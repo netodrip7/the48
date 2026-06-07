@@ -1,0 +1,200 @@
+"""
+GFIS — Geopolitical Fragility Impact Score
+The 48 | World Cup 2026 Analytics Platform
+
+Higher score = more stable/favourable = better for the team.
+Scale: 0 to 100.
+
+Weights:
+    Governance              20%
+    Economic                15%
+    Conflict                25%
+    Football Specific       15%
+    Football Infrastructure 15%
+    Squad Cohesion          10%
+"""
+
+import pandas as pd
+import numpy as np
+import os
+
+GEO_PATH      = r"C:/Users/Deepak Singh/OneDrive/Desktop/wc26/geopolitical.csv"
+PROFILES_PATH = r"C:/Users/Deepak Singh/OneDrive/Desktop/wc26/country_profiles.csv"
+OUTPUT_PATH   = r"C:/Users/Deepak Singh/OneDrive/Desktop/wc26/data/processed/gfis_scores.csv"
+
+NAME_MAP = {
+    "Turkey":           "Türkiye",
+    "Ivory Coast":      "Côte d'Ivoire",
+    "Czech Republic":   "Czechia",
+    "Congo DR":         "DR Congo",
+    "USA":              "United States",
+    "Korea Republic":   "South Korea",
+    "Bosnia & H.":      "Bosnia and Herzegovina",
+}
+
+# ── Conflict overrides (crime ≠ war, football programs function normally) ──────
+CONFLICT_OVERRIDES = {
+    "Brazil":   {"conflict_level": "Low/Inactive", "conflict_severity": 1, "active_conflict": 0},
+    "Mexico":   {"conflict_level": "Turbulent",    "conflict_severity": 2, "active_conflict": 0},
+    "Ecuador":  {"conflict_level": "Turbulent",    "conflict_severity": 2, "active_conflict": 0},
+    "Colombia": {"conflict_level": "Turbulent",    "conflict_severity": 2, "active_conflict": 0},
+}
+
+WEIGHTS = {
+    "governance":    0.20,
+    "economic":      0.15,
+    "conflict":      0.25,
+    "football":      0.15,
+    "infra":         0.15,
+    "squad":         0.10,
+}
+
+GOVERNANCE_COLS = [
+    "control_of_corruption",
+    "government_effectiveness",
+    "political_stability",
+    "rule_of_law",
+]
+
+ECONOMIC_COLS = [
+    "inflation_rate",
+    "unemployment_rate",
+]
+
+CONFLICT_COLS = [
+    "conflict_level",
+    "conflict_severity",
+    "active_conflict",
+]
+
+FOOTBALL_COLS = [
+    "fifa_suspension_history",
+    "state_fragility_legacy",
+    "manager_changes_2022_2026",
+]
+
+INFRA_COLS = [
+    "wc_appearances",
+    "best_finish_num",
+    "total_wc_goals",
+]
+SQUAD_COLS = [
+    "dual_dataset_total",
+    "diaspora_players_known",
+    "eligibility_switchers",
+    "naturalized_players",
+]
+
+INVERT = {
+    "control_of_corruption":      False,
+    "government_effectiveness":   False,
+    "political_stability":        False,
+    "rule_of_law":                False,
+    "inflation_rate":             True,
+    "unemployment_rate":          True,
+    "conflict_level":             True,
+    "conflict_severity":          True,
+    "active_conflict":            True,
+    "fifa_suspension_history":    True,
+    "state_fragility_legacy":     True,
+    "manager_changes_2022_2026":  True,
+    "wc_appearances":             False,
+    "best_finish_num":            False,
+    "total_wc_goals":             False,
+    "dual_dataset_total":         True,
+    "diaspora_players_known":     True,
+    "eligibility_switchers":      True,
+    "naturalized_players":        True,
+}
+
+CONFLICT_LEVEL_MAP = {
+    "Low/Inactive": 1,
+    "Turbulent":    2,
+    "High":         3,
+    "Extreme":      4,
+}
+BEST_FINISH_MAP = {
+    "First Appearance": 0,
+    "Group Stage":      1,
+    "Round of 16":      2,
+    "Quarter-final":    3,
+    "Semi-final":       4,
+    "Runner-up":        5,
+    "Winner":           6,
+}
+
+
+def min_max_scale(series: pd.Series, invert: bool = False) -> pd.Series:
+    mn, mx = series.min(), series.max()
+    if mx == mn:
+        return pd.Series([0.5] * len(series), index=series.index)
+    scaled = (series - mn) / (mx - mn)
+    return 1 - scaled if invert else scaled
+
+
+def score_category(df: pd.DataFrame, cols: list) -> pd.Series:
+    scaled = pd.DataFrame(index=df.index)
+    for col in cols:
+        scaled[col] = min_max_scale(
+            df[col].fillna(df[col].median()),
+            invert=INVERT[col]
+        )
+    return scaled.mean(axis=1)
+
+def main():
+    geo      = pd.read_csv(GEO_PATH)
+    profiles = pd.read_csv(PROFILES_PATH)
+    geo["country"]      = geo["country"].replace(NAME_MAP)
+    profiles["country"] = profiles["country"].replace(NAME_MAP)
+
+    for country, overrides in CONFLICT_OVERRIDES.items():
+        mask = geo["country"] == country
+        for col, val in overrides.items():
+            geo.loc[mask, col] = val
+
+    geo["conflict_level"]       = geo["conflict_level"].map(CONFLICT_LEVEL_MAP)
+    profiles["best_finish_num"] = profiles["best_finish"].map(BEST_FINISH_MAP)
+    df = geo.merge(
+        profiles[["country", "wc_appearances", "best_finish_num", "total_wc_goals"]],
+        on="country",
+        how="left"
+    )
+
+    df["gov_score"]      = score_category(df, GOVERNANCE_COLS)
+    df["econ_score"]     = score_category(df, ECONOMIC_COLS)
+    df["conflict_score"] = score_category(df, CONFLICT_COLS)
+    df["football_score"] = score_category(df, FOOTBALL_COLS)
+    df["infra_score"]    = score_category(df, INFRA_COLS)
+    df["squad_score"]    = score_category(df, SQUAD_COLS)
+
+    df["gfis_raw"] = (
+        df["gov_score"]      * WEIGHTS["governance"] +
+        df["econ_score"]     * WEIGHTS["economic"]   +
+        df["conflict_score"] * WEIGHTS["conflict"]   +
+        df["football_score"] * WEIGHTS["football"]   +
+        df["infra_score"]    * WEIGHTS["infra"]      +
+        df["squad_score"]    * WEIGHTS["squad"]
+    )
+
+    df["gfis_score"] = (df["gfis_raw"] * 100).round(2)
+    df["gfis_rank"]  = df["gfis_score"].rank(ascending=False).astype(int)
+
+    output_cols = [
+        "country", "gfis_score", "gfis_rank",
+        "gov_score", "econ_score", "conflict_score",
+        "football_score", "infra_score", "squad_score",
+    ]
+
+    result = df[output_cols].sort_values("gfis_rank").reset_index(drop=True)
+
+    os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
+    result.to_csv(OUTPUT_PATH, index=False)
+
+    print("GFIS complete. Output saved to:")
+    print(OUTPUT_PATH)
+    print()
+    print(result.to_string(index=False))
+
+
+if __name__ == "__main__":
+    main()
