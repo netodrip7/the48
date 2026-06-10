@@ -1,0 +1,363 @@
+"""
+TPS — Tactical Portability Score
+The 48 | World Cup 2026 Analytics Platform
+
+Measures how well a player's style fits target clubs/leagues.
+Updates live during tournament as WC performance data comes in.
+
+Components:
+    Style Fit (cosine similarity)     40%
+    Tournament Performance            40%
+    Risk Profile                      20%
+"""
+
+import pandas as pd
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
+import os
+
+NT_PATH      = r"C:/Users/Deepak Singh/OneDrive/Desktop/wc26/national_team_stats.xlsx"
+LEAGUE_PATH  = r"C:/Users/Deepak Singh/OneDrive/Desktop/wc26/Copy of league stats.xlsx"
+PLAYERS_PATH = r"C:/Users/Deepak Singh/OneDrive/Desktop/wc26/players.csv"
+SQUADS_PATH  = r"C:/Users/Deepak Singh/OneDrive/Desktop/wc26/squad_values.csv"
+OUTPUT_PATH  = r"C:/Users/Deepak Singh/OneDrive/Desktop/wc26/data/processed/tps_scores.csv"
+
+NAME_MAP = {
+    "Turkey":           "Türkiye",
+    "Ivory Coast":      "Côte d'Ivoire",
+    "Czech Republic":   "Czechia",
+    "Congo DR":         "DR Congo",
+    "USA":              "United States",
+    "Korea Republic":   "South Korea",
+    "Bosnia & H.":      "Bosnia and Herzegovina",
+}
+
+CLUB_NAME_MAP = {
+    "Ajax Amsterdam":                         "Ajax",
+    "Brighton & Hove Albion":                 "Brighton",
+    "Brighton and Hove Albion":               "Brighton",
+    "Borussia Moenchengladbach":              "Borussia Monchengladbach",
+    "FC Augsburg":                            "Augsburg",
+    "Hamburger SV":                           "Hamburg",
+    "Hannover 96":                            "Hannover",
+    "Ipswich Town":                           "Ipswich",
+    "Le Havre AC":                            "Le Havre",
+    "Mainz 05":                               "Mainz",
+    "Olympique Lyonnais":                     "Lyon",
+    "PSV Eindhoven":                          "PSV",
+    "Parma Calcio":                           "Parma",
+    "Paris Saint-Germain":                    "Paris St-Germain",
+    "SC Freiburg":                            "Freiburg",
+    "SC Braga":                               "Braga",
+    "Sporting CP":                            "Sporting",
+    "Stade Rennais":                          "Rennes",
+    "Tottenham Hotspur":                      "Tottenham",
+    "VfB Stuttgart":                          "Stuttgart",
+    "Wolverhampton Wanderers":                "Wolverhampton",
+    "Wolverhampton":                          "Wolverhampton",
+    "Wolves":                                 "Wolverhampton",
+    "West Ham United":                        "West Ham",
+    "Al-Hilal":                               "Al Hilal",
+    "Al-Nassr":                               "Al Nassr",
+    "Al-Ittihad":                             "Al Ittihad",
+    "Al-Ettifaq":                             "Al Ettifaq",
+    "Al-Ahli Saudi":                          "Al-Ahli",
+    "Al-Qadsiah":                             "Al Qadsiah",
+    "Young Boys Bern":                        "Young Boys",
+    "Young Boys Berne":                       "Young Boys",
+    "Feynoord":                               "Feyenoord",
+    "FC Copenhagen":                          "Copenhagen",
+    "Olympiakos":                             "Olympiacos",
+    "Saint-Étienne":                          "Saint-Etienne",
+    "Be?ikta?":                               "Besiktas",
+    "River Plate (on loan from Chelsea)":     "River Plate",
+    "Istanbul Basaksehir (on loan from Roma)":"Istanbul Basaksehir",
+    "Kilmarnock (loan from Rangers)":         "Kilmarnock",
+    "Lens (on loan from Roma)":               "Racing Lens",
+    "Los Angeles FC":                         "LAFC",
+    "New York City FC":                       "New York City",
+}
+
+PL_CLUBS = [
+    "Arsenal", "Aston Villa", "Bournemouth", "Brentford", "Brighton",
+    "Chelsea", "Crystal Palace", "Everton", "Fulham", "Ipswich",
+    "Leicester City", "Liverpool", "Manchester City", "Manchester United",
+    "Newcastle United", "Nottingham Forest", "Southampton", "Tottenham",
+    "West Ham", "Wolverhampton",
+]
+
+LA_LIGA_CLUBS = [
+    "Athletic Bilbao", "Atletico Madrid", "Barcelona", "Celta Vigo",
+    "Espanyol", "Getafe", "Girona", "Granada", "Las Palmas", "Leganes",
+    "Mallorca", "Osasuna", "Rayo Vallecano", "Real Betis", "Real Madrid",
+    "Real Sociedad", "Sevilla", "Valencia", "Villarreal", "Alaves",
+]
+
+LIGUE_1_CLUBS = [
+    "Angers", "Auxerre", "Bastia", "Brest", "Le Havre", "Lens",
+    "Lille", "Lyon", "Marseille", "Monaco", "Montpellier", "Nantes",
+    "Nice", "Paris St-Germain", "Rennes", "Saint-Etienne", "Strasbourg",
+    "Toulouse", "Reims", "Racing Strasbourg", "AJ Auxerre", "Racing Lens",
+    "Stade de Reims", "Paris FC",
+]
+
+SERIE_A_CLUBS = [
+    "AC Milan", "Atalanta", "Bologna", "Cagliari", "Como", "Empoli",
+    "Fiorentina", "Genoa", "Inter Milan", "Juventus", "Lazio", "Lecce",
+    "Monza", "Napoli", "Parma", "Roma", "Sassuolo", "Torino",
+    "Udinese", "Venezia", "Verona",
+]
+
+BUNDESLIGA_CLUBS = [
+    "Augsburg", "Bayer Leverkusen", "Bayern Munich", "Borussia Dortmund",
+    "Borussia Monchengladbach", "Eintracht Frankfurt", "Freiburg",
+    "Hamburg", "Hannover", "Hoffenheim", "Holstein Kiel", "Mainz",
+    "RB Leipzig", "Stuttgart", "Union Berlin", "Werder Bremen",
+    "Wolfsburg", "St Pauli",
+]
+
+LEAGUE_MAP = {}
+for club in PL_CLUBS:
+    LEAGUE_MAP[club] = "PL"
+for club in LA_LIGA_CLUBS:
+    LEAGUE_MAP[club] = "La Liga"
+for club in LIGUE_1_CLUBS:
+    LEAGUE_MAP[club] = "Ligue 1"
+for club in SERIE_A_CLUBS:
+    LEAGUE_MAP[club] = "serie A"
+for club in BUNDESLIGA_CLUBS:
+    LEAGUE_MAP[club] = "Bundesliga"
+
+NT_STYLE_COLS = [
+    "avg Possession % per match",
+    "avg Pass % per match",
+    "avg Tackles per match",
+    "avg interceptions per match",
+    "avg Aerials per match",
+    "avg Dribbles per match",
+]
+
+NT_TENDENCY_COLS = [
+    "avg Goals per match",
+    "avg Shots per match",
+    "avg Fouls per match",
+    "avg Offsides per match",
+]
+
+LEAGUE_STYLE_COLS = [
+    "Possession%",
+    "Pass%",
+    "Tackles Won",
+    "Interceptions",
+    "Aerials Won",
+    "Dribbles pg",
+]
+
+LEAGUE_TENDENCY_COLS = [
+    "set piece dependency",
+    "counter attack dependency",
+    "Long Balls pg",
+    "Total Goals",
+]
+
+
+def cosine_sim(v1, v2):
+    return cosine_similarity(v1.reshape(1, -1), v2.reshape(1, -1))[0][0]
+
+
+def get_league_fingerprints(league_path):
+    sheets = ["PL", "La Liga", "Ligue 1", "serie A", "Bundesliga"]
+    fingerprints = {}
+    xl = pd.ExcelFile(league_path)
+    for sheet in sheets:
+        df = xl.parse(sheet, header=0)
+        df.columns = [str(c).strip() for c in df.columns]
+        if sheet == "Bundesliga":
+            df["Interceptions"] = df["Interceptions"] * 34
+        for col in LEAGUE_STYLE_COLS + LEAGUE_TENDENCY_COLS:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        style_vec    = df[LEAGUE_STYLE_COLS].mean().values.astype(float)
+        tendency_vec = df[LEAGUE_TENDENCY_COLS].mean().values.astype(float)
+        fingerprints[sheet] = {
+            "style":    style_vec,
+            "tendency": tendency_vec,
+        }
+    return fingerprints
+
+
+def get_club_vectors(league_path):
+    sheets = ["PL", "La Liga", "Ligue 1", "serie A", "Bundesliga"]
+    club_vectors = {}
+    xl = pd.ExcelFile(league_path)
+    for sheet in sheets:
+        df = xl.parse(sheet, header=0)
+        df.columns = [str(c).strip() for c in df.columns]
+        if sheet == "Bundesliga":
+            df["Interceptions"] = df["Interceptions"] * 34
+        for col in LEAGUE_STYLE_COLS + LEAGUE_TENDENCY_COLS:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        for _, row in df.iterrows():
+            club_name = str(row["club"]).strip()
+            if club_name == "nan":
+                continue
+            style_vec    = row[LEAGUE_STYLE_COLS].values.astype(float)
+            tendency_vec = row[LEAGUE_TENDENCY_COLS].values.astype(float)
+            club_vectors[club_name] = {
+                "style":    style_vec,
+                "tendency": tendency_vec,
+                "league":   sheet,
+            }
+    return club_vectors
+
+
+def get_best_club_per_league(nt_s_vec, nt_t_vec, club_vectors):
+    leagues = ["PL", "La Liga", "Ligue 1", "serie A", "Bundesliga"]
+    best = {}
+    for league in leagues:
+        league_clubs = {c: d for c, d in club_vectors.items() if d["league"] == league}
+        if not league_clubs:
+            continue
+        scores = []
+        for club, data in league_clubs.items():
+            s = cosine_sim(nt_s_vec, data["style"]) * 0.6 + \
+                cosine_sim(nt_t_vec, data["tendency"]) * 0.4
+            scores.append((club, round(s, 3)))
+        scores.sort(key=lambda x: x[1], reverse=True)
+        best[league] = (scores[0][0], scores[0][1])
+    return best
+
+
+def main():
+    nt      = pd.read_excel(NT_PATH)
+    players = pd.read_csv(PLAYERS_PATH, encoding='latin1')
+    squads  = pd.read_csv(SQUADS_PATH, encoding='latin1')
+
+    players.columns = ['name', 'club', 'national_team', 'x1', 'x2', 'x3']
+    players = players[['name', 'club', 'national_team']].copy()
+    players['national_team'] = players['national_team'].str.title()
+    players['national_team'] = players['national_team'].replace(NAME_MAP)
+    players['club'] = players['club'].replace(CLUB_NAME_MAP)
+
+    nt['Country'] = nt['Country'].str.title().replace(NAME_MAP)
+    squads['country'] = squads['country'].replace(NAME_MAP)
+
+    # ── Build NT vectors ──────────────────────────────────────────────────────
+    nt_style_vectors    = {}
+    nt_tendency_vectors = {}
+    for _, row in nt.iterrows():
+        nt_style_vectors[row['Country']]    = row[NT_STYLE_COLS].values.astype(float)
+        nt_tendency_vectors[row['Country']] = row[NT_TENDENCY_COLS].values.astype(float)
+
+    league_fingerprints = get_league_fingerprints(LEAGUE_PATH)
+    club_vectors        = get_club_vectors(LEAGUE_PATH)
+
+    # ── Normalise club vectors together ───────────────────────────────────────
+    club_names = list(club_vectors.keys())
+    raw_style  = np.array([club_vectors[c]["style"]    for c in club_names])
+    raw_tend   = np.array([club_vectors[c]["tendency"] for c in club_names])
+
+    mn, mx = raw_style.min(axis=0), raw_style.max(axis=0)
+    diff   = np.where(mx - mn == 0, 1, mx - mn)
+    normed_style = (raw_style - mn) / diff
+    for i, name in enumerate(club_names):
+        club_vectors[name]["style"] = normed_style[i]
+
+    mn, mx = raw_tend.min(axis=0), raw_tend.max(axis=0)
+    diff   = np.where(mx - mn == 0, 1, mx - mn)
+    normed_tend = (raw_tend - mn) / diff
+    for i, name in enumerate(club_names):
+        club_vectors[name]["tendency"] = normed_tend[i]
+
+    # ── Normalise NT vectors together ─────────────────────────────────────────
+    nt_names = list(nt_style_vectors.keys())
+    raw_nt_s = np.array([nt_style_vectors[n]    for n in nt_names])
+    raw_nt_t = np.array([nt_tendency_vectors[n] for n in nt_names])
+
+    mn, mx = raw_nt_s.min(axis=0), raw_nt_s.max(axis=0)
+    diff   = np.where(mx - mn == 0, 1, mx - mn)
+    normed_nt_s = (raw_nt_s - mn) / diff
+    for i, name in enumerate(nt_names):
+        nt_style_vectors[name] = normed_nt_s[i]
+
+    mn, mx = raw_nt_t.min(axis=0), raw_nt_t.max(axis=0)
+    diff   = np.where(mx - mn == 0, 1, mx - mn)
+    normed_nt_t = (raw_nt_t - mn) / diff
+    for i, name in enumerate(nt_names):
+        nt_tendency_vectors[name] = normed_nt_t[i]
+
+    squad_2026 = squads[squads['year'] == 2026].set_index('country')
+
+    # ── Score each player ─────────────────────────────────────────────────────
+    results = []
+    for _, player in players.iterrows():
+        name     = player['name']
+        club     = player['club']
+        nat_team = player['national_team']
+
+        if nat_team not in nt_style_vectors:
+            continue
+
+        nt_s_vec = nt_style_vectors[nat_team]
+        nt_t_vec = nt_tendency_vectors[nat_team]
+
+        league = LEAGUE_MAP.get(club, None) if pd.notna(club) else None
+
+        if pd.notna(club) and club in club_vectors:
+            style_fit = (
+                cosine_sim(nt_s_vec, club_vectors[club]["style"])    * 0.6 +
+                cosine_sim(nt_t_vec, club_vectors[club]["tendency"]) * 0.4
+            )
+        elif league and league in league_fingerprints:
+            style_fit = cosine_sim(nt_s_vec, league_fingerprints[league]["style"])
+        else:
+            style_fit = None
+
+        best_clubs = get_best_club_per_league(nt_s_vec, nt_t_vec, club_vectors)
+        all_best   = sorted(best_clubs.items(), key=lambda x: x[1][1], reverse=True)[:2]
+        top3_str   = " | ".join([f"{c} ({lg}): {score}" for lg, (c, score) in all_best])
+
+        avg_age = squad_2026.loc[nat_team, 'avg_age'] if nat_team in squad_2026.index else None
+
+        tournament_perf = 0.0
+
+        if avg_age is not None:
+            age_score = max(0, 1 - (avg_age - 21) / 15)
+        else:
+            age_score = 0.5
+
+        if style_fit is not None:
+            tps_static = (style_fit * 0.40 + age_score * 0.20)
+        else:
+            tps_static = age_score * 0.20
+
+        tps_live = tps_static + (tournament_perf * 0.40)
+
+        results.append({
+            "name":            name,
+            "national_team":   nat_team,
+            "club":            club if pd.notna(club) else "Unknown",
+            "league":          league if league else "Outside Top 5",
+            "style_fit":       round(style_fit, 4) if style_fit is not None else None,
+            "age_score":       round(age_score, 4),
+            "tournament_perf": tournament_perf,
+            "tps_static":      round(tps_static * 100, 2),
+            "tps_live":        round(tps_live * 100, 2),
+            "top3_clubs":      top3_str,
+        })
+
+    result_df = pd.DataFrame(results)
+    result_df['tps_rank'] = result_df['tps_live'].rank(
+        ascending=False, na_option='bottom').astype(int)
+    result_df = result_df.sort_values('tps_rank').reset_index(drop=True)
+
+    os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
+    result_df.to_csv(OUTPUT_PATH, index=False)
+
+    print("TPS complete. Output saved to:")
+    print(OUTPUT_PATH)
+    print()
+    print(result_df.head(20).to_string(index=False))
+
+
+if __name__ == "__main__":
+    main()
