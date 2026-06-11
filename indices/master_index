@@ -1,0 +1,104 @@
+"""
+merge.py
+Merges gfis_scores.csv, mes_scores.csv, sci_scores.csv into master_index.csv
+TPS is player-level and kept separate.
+Output: data/processed/master_index.csv
+"""
+
+import pandas as pd
+import os
+
+# ── Paths ──────────────────────────────────────────────────────────────────────
+BASE_DIR    = r"C:/Users/Deepak Singh/OneDrive/Desktop/wc26"
+PROCESSED   = os.path.join(BASE_DIR, "data/processed")
+
+GFIS_PATH   = os.path.join(PROCESSED, "gfis_scores.csv")
+MES_PATH    = os.path.join(PROCESSED, "mes_scores.csv")
+SCI_PATH    = os.path.join(PROCESSED, "sci_scores.csv")
+NT_PATH     = os.path.join(BASE_DIR,  "national_teams - Sheet1.csv")
+OUTPUT_PATH = os.path.join(PROCESSED, "master_index.csv")
+
+# ── Name standardisation (apply consistently across all files) ─────────────────
+NAME_MAP = {
+    "Turkey":                    "Türkiye",
+    "Turkiye":                   "Türkiye",
+    "Ivory Coast":               "Côte d'Ivoire",
+    "Cote d'Ivoire":             "Côte d'Ivoire",
+    "Czech Republic":            "Czechia",
+    "Congo DR":                  "DR Congo",
+    "Democratic Republic of Congo": "DR Congo",
+    "USA":                       "United States",
+    "US":                        "United States",
+    "Korea Republic":            "South Korea",
+    "Bosnia-Herzegovina":        "Bosnia and Herzegovina",
+}
+
+def standardise(df, col):
+    df[col] = df[col].str.strip().replace(NAME_MAP)
+    return df
+
+# ── Load national_teams for fifa_rank ─────────────────────────────────────────
+nt = pd.read_csv(NT_PATH, encoding="latin1")
+nt = standardise(nt, "country")
+nt = nt[["country", "fifa_ranking"]].rename(columns={"fifa_ranking": "fifa_rank"})
+
+# ── Load GFIS ─────────────────────────────────────────────────────────────────
+gfis = pd.read_csv(GFIS_PATH)
+gfis = standardise(gfis, "country")
+gfis = gfis[["country", "gfis_score"]]
+
+# ── Load MES ──────────────────────────────────────────────────────────────────
+mes = pd.read_csv(MES_PATH)
+mes = mes.rename(columns={"team": "country"})       # MES uses 'team' as key
+mes = standardise(mes, "country")
+mes = mes[["country", "mes_score", "mes_live", "tournament_adjustment"]]
+
+# ── Load SCI ──────────────────────────────────────────────────────────────────
+sci = pd.read_csv(SCI_PATH)
+sci = standardise(sci, "country")
+sci = sci[["country", "sci_score", "ranking_score", "historical_score", "efficiency_score"]]
+
+# ── Merge ─────────────────────────────────────────────────────────────────────
+master = gfis \
+    .merge(mes,  on="country", how="outer") \
+    .merge(sci,  on="country", how="outer") \
+    .merge(nt,   on="country", how="left")
+
+# ── Reorder columns ───────────────────────────────────────────────────────────
+col_order = [
+    "country",
+    "fifa_rank",
+    # GFIS
+    "gfis_score",
+    # MES
+    "mes_score",
+    "mes_live",
+    "tournament_adjustment",
+    # SCI
+    "sci_score",
+    "ranking_score",
+    "historical_score",
+    "efficiency_score",
+]
+# Keep any unexpected extra columns at the end
+extra = [c for c in master.columns if c not in col_order]
+master = master[col_order + extra]
+
+# ── Sort by fifa_rank ─────────────────────────────────────────────────────────
+master = master.sort_values("fifa_rank").reset_index(drop=True)
+
+# ── Sanity checks ─────────────────────────────────────────────────────────────
+print(f"Rows in master_index: {len(master)}  (expected 48)")
+
+missing = master[master.isnull().any(axis=1)]
+if not missing.empty:
+    print("\nWARNING — rows with missing values:")
+    print(missing[["country"] + [c for c in missing.columns if missing[c].isnull().any()]].to_string())
+else:
+    print("No missing values — clean merge.")
+
+# ── Save ──────────────────────────────────────────────────────────────────────
+os.makedirs(PROCESSED, exist_ok=True)
+master.to_csv(OUTPUT_PATH, index=False, encoding="utf-8")
+print(f"\nSaved → {OUTPUT_PATH}")
+print(master.head(10).to_string())
