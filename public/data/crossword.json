@@ -1,0 +1,19 @@
+{
+  "date": "June 11, 2026",
+  "theme": "Opening Day",
+  "grid": [
+    [{"letter":"G","black":false,"number":1},{"letter":"O","black":false},{"letter":"A","black":false},{"letter":"L","black":false},{"letter":"S","black":false}],
+    [{"letter":"R","black":false,"number":2},{"letter":"#","black":true},{"letter":"R","black":false,"number":3},{"letter":"#","black":true},{"letter":"P","black":false,"number":4}],
+    [{"letter":"O","black":false},{"letter":"#","black":true},{"letter":"A","black":false},{"letter":"#","black":true},{"letter":"A","black":false}],
+    [{"letter":"U","black":false},{"letter":"#","black":true},{"letter":"N","black":false},{"letter":"#","black":true},{"letter":"S","black":false}],
+    [{"letter":"P","black":false,"number":5},{"letter":"I","black":false},{"letter":"T","black":false},{"letter":"C","black":false},{"letter":"H","black":false}]
+  ],
+  "clues": [
+    {"number":1,"direction":"across","clue":"What every striker dreams of","answer":"GOALS","row":0,"col":0,"length":5},
+    {"number":2,"direction":"across","clue":"Rough and ready","answer":"RAW","row":1,"col":0,"length":1},
+    {"number":5,"direction":"across","clue":"Where the game is played","answer":"PITCH","row":4,"col":0,"length":5},
+    {"number":1,"direction":"down","clue":"Germany's tournament abbreviation","answer":"GROUP","row":0,"col":0,"length":5},
+    {"number":3,"direction":"down","clue":"A _____ of nations","answer":"RANT","row":1,"col":2,"length":4},
+    {"number":4,"direction":"down","clue":"Go past a defender","answer":"SPAS","row":1,"col":4,"length":4}
+  ]
+}
