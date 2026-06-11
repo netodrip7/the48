@@ -1,0 +1,401 @@
+"""
+live_update.py
+The 48 | World Cup 2026 Analytics Platform
+
+Run this after each match day to:
+1. Pull WC match results from SportAPI
+2. Update mes_scores.csv  → mes_live, tournament_adjustment
+3. Update sci_scores.csv  → ranking_score (tournament points)
+4. Update tps_scores.csv  → tps_live, tournament_perf
+5. Regenerate master_index.csv
+6. Save match_results.csv and standings.csv for the website
+
+Usage:
+    python live_update.py --date 2026-06-15
+    python live_update.py --date 2026-06-15 --dry-run
+"""
+
+import argparse
+import json
+import os
+import requests
+import pandas as pd
+from datetime import datetime, timedelta
+
+# ── Config ────────────────────────────────────────────────────────────────────
+RAPIDAPI_KEY  = "YOUR_RAPIDAPI_KEY_HERE"   # ← drop your key here
+RAPIDAPI_HOST = "sportapi7.p.rapidapi.com"
+WC_TOURNAMENT_ID = 16                       # FIFA World Cup uniqueTournament id
+
+BASE_DIR   = r"C:/Users/Deepak Singh/OneDrive/Desktop/wc26"
+PROCESSED  = os.path.join(BASE_DIR, "data/processed")
+LIVE_DIR   = os.path.join(BASE_DIR, "data/live")
+
+HEADERS = {
+    "x-rapidapi-key":  RAPIDAPI_KEY,
+    "x-rapidapi-host": RAPIDAPI_HOST,
+}
+
+# ── Name map: SportAPI names → our standardised names ────────────────────────
+API_NAME_MAP = {
+    "USA":                       "United States",
+    "Korea Republic":            "South Korea",
+    "IR Iran":                   "Iran",
+    "Ivory Coast":               "Côte d'Ivoire",
+    "Congo DR":                  "DR Congo",
+    "Bosnia & H.":               "Bosnia and Herzegovina",
+    "Turkey":                    "Türkiye",
+    "Cabo Verde":                "Cape Verde",
+    "Czech Republic":            "Czechia",
+    "Cape Verde Islands":        "Cape Verde",
+}
+
+def standardise(name: str) -> str:
+    return API_NAME_MAP.get(name.strip(), name.strip())
+
+# ── API helpers ───────────────────────────────────────────────────────────────
+def get_scheduled_events(date_str: str) -> list:
+    """Fetch all events for a date, filter to FIFA World Cup only."""
+    url = f"https://{RAPIDAPI_HOST}/api/v1/sport/football/scheduled-events/{date_str}"
+    r = requests.get(url, headers=HEADERS, timeout=15)
+    r.raise_for_status()
+    events = r.json().get("events", [])
+    wc = [
+        e for e in events
+        if e.get("tournament", {})
+           .get("uniqueTournament", {})
+           .get("id") == WC_TOURNAMENT_ID
+    ]
+    print(f"  {date_str}: {len(events)} total events → {len(wc)} WC matches")
+    return wc
+
+def get_player_stats(event_id: int) -> list:
+    """Fetch player statistics for a finished match."""
+    url = f"https://{RAPIDAPI_HOST}/api/v1/event/{event_id}/player-statistics/1/accumulated"
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=15)
+        r.raise_for_status()
+        return r.json().get("statistics", [])
+    except Exception as e:
+        print(f"  Player stats unavailable for event {event_id}: {e}")
+        return []
+
+# ── Parse match results ───────────────────────────────────────────────────────
+def parse_matches(events: list) -> pd.DataFrame:
+    """Convert raw API events into a clean match DataFrame."""
+    rows = []
+    for e in events:
+        status = e.get("status", {})
+        finished = status.get("type") == "finished"
+        home = standardise(e["homeTeam"]["name"])
+        away = standardise(e["awayTeam"]["name"])
+        hs = e.get("homeScore", {}).get("current", 0)
+        as_ = e.get("awayScore", {}).get("current", 0)
+        winner = e.get("winnerCode", 0)  # 1=home, 2=away, 3=draw
+        rows.append({
+            "event_id":        e["id"],
+            "date":            datetime.fromtimestamp(e["startTimestamp"]).strftime("%Y-%m-%d"),
+            "home_team":       home,
+            "away_team":       away,
+            "home_score":      hs,
+            "away_score":      as_,
+            "winner_code":     winner,   # 1=home, 2=away, 3=draw
+            "home_red_cards":  e.get("homeRedCards", 0),
+            "away_red_cards":  e.get("awayRedCards", 0),
+            "status":          status.get("type", "unknown"),
+            "finished":        finished,
+            "group":           e.get("tournament", {}).get("groupName", ""),
+        })
+    return pd.DataFrame(rows)
+
+# ── MES live update ───────────────────────────────────────────────────────────
+def update_mes(matches: pd.DataFrame, mes: pd.DataFrame, dry_run: bool) -> pd.DataFrame:
+    """
+    Update mes_live based on finished matches.
+    Logic:
+      - Win after going behind (comeback): +2.0
+      - Loss after leading (collapse):     -2.0
+      - Win with red card:                 +1.5
+      - Loss with red card:                -1.0
+      - Penalty win:                       +1.0
+      - Penalty loss:                      -1.5
+    Adjustments are cumulative across the tournament.
+    """
+    finished = matches[matches["finished"]].copy()
+    adjustments = {}
+
+    for _, m in finished.iterrows():
+        for team, is_home in [(m["home_team"], True), (m["away_team"], False)]:
+            adj = 0.0
+            score_for     = m["home_score"]  if is_home else m["away_score"]
+            score_against = m["away_score"]  if is_home else m["home_score"]
+            won  = (m["winner_code"] == 1 and is_home) or (m["winner_code"] == 2 and not is_home)
+            lost = (m["winner_code"] == 2 and is_home) or (m["winner_code"] == 1 and not is_home)
+            red_cards = m["home_red_cards"] if is_home else m["away_red_cards"]
+
+            if won and score_against > 0:   adj += 2.0   # comeback win (scored while behind)
+            if lost and score_for > 0:      adj -= 2.0   # collapse
+            if won and red_cards > 0:       adj += 1.5   # won despite red card
+            if lost and red_cards > 0:      adj -= 1.0   # lost with red card
+
+            adjustments[team] = adjustments.get(team, 0.0) + adj
+
+    mes = mes.copy()
+    for team, adj in adjustments.items():
+        mask = mes["team"] == team
+        if mask.any():
+            mes.loc[mask, "tournament_adjustment"] += adj
+            mes.loc[mask, "mes_live"] = (mes.loc[mask, "mes_score"] + adj).clip(0, 100)
+        else:
+            print(f"  WARNING: MES — team not found: {team}")
+
+    if dry_run:
+        print("\n[DRY RUN] MES adjustments that would be applied:")
+        for t, a in adjustments.items():
+            print(f"  {t}: {a:+.1f}")
+    return mes
+
+# ── SCI live update ───────────────────────────────────────────────────────────
+def update_sci(matches: pd.DataFrame, sci: pd.DataFrame, dry_run: bool) -> pd.DataFrame:
+    """
+    Update ranking_score based on tournament points accumulated.
+    Group stage: Win=3, Draw=1, Loss=0.
+    Knockout stage: Win=3 (regardless of AET/pens).
+    Points are added to a running tournament_points column.
+    sci_score itself isn't changed — ranking_score component updated only.
+    """
+    finished = matches[matches["finished"]].copy()
+    points = {}
+
+    for _, m in finished.iterrows():
+        for team, is_home in [(m["home_team"], True), (m["away_team"], False)]:
+            winner_code = m["winner_code"]
+            won  = (winner_code == 1 and is_home) or (winner_code == 2 and not is_home)
+            draw = winner_code == 3
+            pts  = 3 if won else (1 if draw else 0)
+            points[team] = points.get(team, 0) + pts
+
+    sci = sci.copy()
+    if "tournament_points" not in sci.columns:
+        sci["tournament_points"] = 0
+
+    for team, pts in points.items():
+        mask = sci["country"] == team
+        if mask.any():
+            sci.loc[mask, "tournament_points"] += pts
+            # Nudge ranking_score by 0.01 per point (small live signal, not a full rescale)
+            sci.loc[mask, "ranking_score"] = (
+                sci.loc[mask, "ranking_score"] + pts * 0.01
+            ).clip(0, 1)
+        else:
+            print(f"  WARNING: SCI — team not found: {team}")
+
+    if dry_run:
+        print("\n[DRY RUN] SCI tournament points that would be added:")
+        for t, p in points.items():
+            print(f"  {t}: +{p} pts")
+    return sci
+
+# ── TPS live update ───────────────────────────────────────────────────────────
+def update_tps(matches: pd.DataFrame, tps: pd.DataFrame, dry_run: bool) -> pd.DataFrame:
+    """
+    Update tps_live and tournament_perf per player.
+    Fetches player stats for each finished match and adds:
+      - goals, assists, minutes played, rating (if available)
+    tournament_perf is a running aggregate; tps_live = tps_score + tournament_perf bonus.
+    """
+    tps = tps.copy()
+    if "tournament_perf" not in tps.columns:
+        tps["tournament_perf"] = 0.0
+    if "tournament_goals" not in tps.columns:
+        tps["tournament_goals"] = 0
+    if "tournament_assists" not in tps.columns:
+        tps["tournament_assists"] = 0
+    if "tournament_minutes" not in tps.columns:
+        tps["tournament_minutes"] = 0
+
+    finished = matches[matches["finished"]]
+    all_player_stats = []
+
+    for _, m in finished.iterrows():
+        stats = get_player_stats(int(m["event_id"]))
+        for team_stats in stats:
+            team_name = standardise(team_stats.get("teamName", ""))
+            for p in team_stats.get("players", []):
+                s = p.get("statistics", {})
+                all_player_stats.append({
+                    "player_name": p.get("name", ""),
+                    "team":        team_name,
+                    "goals":       s.get("goals", 0) or 0,
+                    "assists":     s.get("goalAssist", 0) or 0,
+                    "minutes":     s.get("minutesPlayed", 0) or 0,
+                    "rating":      s.get("rating", None),
+                })
+
+    if not all_player_stats:
+        print("  No player stats available yet.")
+        return tps
+
+    perf_df = pd.DataFrame(all_player_stats)
+    perf_agg = perf_df.groupby("player_name").agg(
+        goals=("goals", "sum"),
+        assists=("assists", "sum"),
+        minutes=("minutes", "sum"),
+    ).reset_index()
+
+    for _, row in perf_agg.iterrows():
+        mask = tps["player_name"] == row["player_name"]
+        if mask.any():
+            tps.loc[mask, "tournament_goals"]   += row["goals"]
+            tps.loc[mask, "tournament_assists"] += row["assists"]
+            tps.loc[mask, "tournament_minutes"] += row["minutes"]
+            # Simple performance bonus: goals*2 + assists*1, capped at 10
+            bonus = min(row["goals"] * 2 + row["assists"] * 1, 10)
+            tps.loc[mask, "tournament_perf"]    += bonus
+            tps.loc[mask, "tps_live"] = (tps.loc[mask, "tps_score"] + bonus).clip(0, 100)
+
+    if dry_run:
+        top = perf_agg[perf_agg["goals"] + perf_agg["assists"] > 0].head(10)
+        print("\n[DRY RUN] Top player contributions that would be applied:")
+        print(top.to_string(index=False))
+
+    return tps
+
+# ── Save match results for website ───────────────────────────────────────────
+def save_match_results(matches: pd.DataFrame):
+    """Save/append to match_results.csv for the Match Day tab."""
+    os.makedirs(LIVE_DIR, exist_ok=True)
+    path = os.path.join(LIVE_DIR, "match_results.csv")
+    if os.path.exists(path):
+        existing = pd.read_csv(path)
+        combined = pd.concat([existing, matches], ignore_index=True)
+        combined = combined.drop_duplicates(subset=["event_id"])
+    else:
+        combined = matches
+    combined.to_csv(path, index=False)
+    print(f"  Saved match results → {path}  ({len(combined)} total matches)")
+
+def save_standings(matches: pd.DataFrame):
+    """Derive group standings from all match results so far."""
+    path = os.path.join(LIVE_DIR, "match_results.csv")
+    if os.path.exists(path):
+        all_matches = pd.read_csv(path)
+    else:
+        all_matches = matches
+
+    finished = all_matches[all_matches["status"] == "finished"].copy()
+    rows = []
+    for _, m in finished.iterrows():
+        for team, is_home in [(m["home_team"], True), (m["away_team"], False)]:
+            gf = m["home_score"] if is_home else m["away_score"]
+            ga = m["away_score"] if is_home else m["home_score"]
+            w  = (m["winner_code"] == 1 and is_home) or (m["winner_code"] == 2 and not is_home)
+            d  = m["winner_code"] == 3
+            rows.append({
+                "team":   team,
+                "group":  m.get("group", ""),
+                "played": 1,
+                "won":    int(w),
+                "drawn":  int(d),
+                "lost":   int(not w and not d),
+                "gf":     gf,
+                "ga":     ga,
+                "gd":     gf - ga,
+                "points": 3 if w else (1 if d else 0),
+            })
+
+    if not rows:
+        return
+
+    standings = pd.DataFrame(rows).groupby(["group", "team"]).sum().reset_index()
+    standings = standings.sort_values(
+        ["group", "points", "gd", "gf"], ascending=[True, False, False, False]
+    )
+    out = os.path.join(LIVE_DIR, "standings.csv")
+    standings.to_csv(out, index=False)
+    print(f"  Saved standings → {out}")
+
+# ── Regenerate master_index ───────────────────────────────────────────────────
+def regenerate_master(mes, sci):
+    """Quick re-merge of GFIS + updated MES + updated SCI."""
+    gfis = pd.read_csv(os.path.join(PROCESSED, "gfis_scores.csv"))
+    nt   = pd.read_csv(
+        os.path.join(BASE_DIR, "national_teams - Sheet1.csv"), encoding="latin1"
+    )
+    nt = nt[["country", "fifa_ranking"]].rename(columns={"fifa_ranking": "fifa_rank"})
+
+    mes_out = mes[["team", "mes_score", "mes_live", "tournament_adjustment"]].rename(
+        columns={"team": "country"}
+    )
+    sci_out = sci[["country", "sci_score", "ranking_score", "historical_score",
+                   "efficiency_score"]]
+
+    master = (
+        gfis[["country", "gfis_score"]]
+        .merge(mes_out, on="country", how="outer")
+        .merge(sci_out, on="country", how="outer")
+        .merge(nt,      on="country", how="left")
+    )
+    master = master.sort_values("fifa_rank").reset_index(drop=True)
+    out = os.path.join(PROCESSED, "master_index.csv")
+    master.to_csv(out, index=False)
+    print(f"  Regenerated master_index.csv → {out}")
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--date",    required=True, help="Date to fetch: YYYY-MM-DD")
+    parser.add_argument("--dry-run", action="store_true", help="Preview changes without saving")
+    args = parser.parse_args()
+
+    print(f"\n{'='*60}")
+    print(f"The 48 — Live Update | {args.date}")
+    print(f"{'='*60}\n")
+
+    # ── 1. Fetch matches ──────────────────────────────────────────────────────
+    print("Fetching WC matches from SportAPI...")
+    events = get_scheduled_events(args.date)
+    if not events:
+        print("No WC matches found for this date. Exiting.")
+        return
+
+    matches = parse_matches(events)
+    finished_count = matches["finished"].sum()
+    print(f"  Found {len(matches)} WC matches ({finished_count} finished)\n")
+    print(matches[["home_team", "away_team", "home_score", "away_score", "status"]].to_string(index=False))
+    print()
+
+    # ── 2. Load current CSVs ──────────────────────────────────────────────────
+    mes = pd.read_csv(os.path.join(PROCESSED, "mes_scores.csv"))
+    sci = pd.read_csv(os.path.join(PROCESSED, "sci_scores.csv"))
+    tps = pd.read_csv(os.path.join(PROCESSED, "tps_scores.csv"), encoding="latin1")
+
+    # ── 3. Apply updates ──────────────────────────────────────────────────────
+    print("Updating MES...")
+    mes = update_mes(matches, mes, args.dry_run)
+
+    print("Updating SCI...")
+    sci = update_sci(matches, sci, args.dry_run)
+
+    print("Updating TPS (fetching player stats)...")
+    tps = update_tps(matches, tps, args.dry_run)
+
+    # ── 4. Save ───────────────────────────────────────────────────────────────
+    if not args.dry_run:
+        mes.to_csv(os.path.join(PROCESSED, "mes_scores.csv"), index=False)
+        sci.to_csv(os.path.join(PROCESSED, "sci_scores.csv"), index=False)
+        tps.to_csv(os.path.join(PROCESSED, "tps_scores.csv"), index=False)
+        save_match_results(matches)
+        save_standings(matches)
+        regenerate_master(mes, sci)
+        print("\nAll files updated successfully.")
+    else:
+        print("\n[DRY RUN] No files were written.")
+
+    print(f"\n{'='*60}\n")
+
+import sys
+sys.argv = ['live_update.py', '--date', '2026-06-15']  # change date as needed
+# sys.argv = ['live_update.py', '--date', '2026-06-15', '--dry-run']  # dry run
+
+main()
